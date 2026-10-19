@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     image_source: str = "auto"  # auto | article | commons | none
     import_to_photos: bool = False
     sync_dir: str = ""
+    smtp_user: str = ""
+    smtp_password: str = ""
+    approver_email: str = ""
+    approval_deadline_hour: int = 12
 
 
 @lru_cache

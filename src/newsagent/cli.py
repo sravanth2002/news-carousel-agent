@@ -1,10 +1,13 @@
 import json
 import logging
+import re
+import secrets
 import shutil
 import subprocess
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
+import httpx
 import typer
 
 from newsagent.config import get_settings
@@ -14,6 +17,8 @@ from newsagent.summarize import build_digest, save_history
 
 app = typer.Typer(add_completion=False)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("newsagent")
 
 
@@ -88,7 +93,8 @@ def _deliver(out: Path, paths: list[Path], caption: str) -> None:
 def daily(
     force: bool = typer.Option(False, help="Regenerate even if already prepared today"),
 ) -> None:
-    """Build today's slides, copy them to Drive/Photos, copy the caption. Post manually."""
+    """Build today's slides, copy to Drive, and email an approval request."""
+    s = get_settings()
     out = _today_dir()
     marker = out / ".prepared"
     if marker.exists() and not force:
@@ -97,9 +103,108 @@ def daily(
         caption = (out / "caption.txt").read_text()
     else:
         paths, caption, slides = _build(out)
-        save_history(slides)  # so tomorrow's stories differ
+        save_history(slides)
         marker.touch()
+        if s.smtp_user and s.approver_email:
+            from newsagent.notify.mailer import send_preview
+
+            token = secrets.token_urlsafe(8)
+            (out / ".token").write_text(token)
+            (out / ".hold").unlink(missing_ok=True)
+            try:
+                send_preview(paths, caption, token)
+            except Exception as e:  # never lose the Drive delivery over an email problem
+                log.warning("Preview email failed: %s", e)
     _deliver(out, paths, caption)
+
+
+def _publish(out: Path) -> None:
+    from newsagent.publish.instagram import publish_carousel
+    from newsagent.storage.cloudinary import upload
+
+    paths = sorted(out.glob("slide_*.jpg"))
+    caption = (out / "caption.txt").read_text()
+    post_id = publish_carousel([upload(p) for p in paths], caption)
+    _mark_posted(post_id)
+    log.info("Published: %s", post_id)
+    subprocess.run(
+        [
+            "osascript",
+            "-e",
+            'display notification "Posted to Instagram" with title "News carousel"',
+        ],
+        check=False,
+    )
+
+
+@app.command()
+def post() -> None:
+    """Publish today's prepared slides to Instagram (manual override)."""
+    out = _today_dir()
+    if (out / ".hold").exists() or _already_posted():
+        log.info("Held or already posted, nothing to do")
+        raise typer.Exit()
+    if not (out / ".prepared").exists():
+        log.error("Nothing prepared today, run `newsagent daily` first")
+        raise typer.Exit(1)
+    _publish(out)
+
+
+@app.command("refresh-token")
+def refresh_token() -> None:
+    """Extend the Instagram token by 60 days and save it to .env."""
+    s = get_settings()
+    r = httpx.get(
+        "https://graph.instagram.com/refresh_access_token",
+        params={"grant_type": "ig_refresh_token", "access_token": s.ig_token},
+        timeout=30,
+    )
+    if r.is_error:
+        log.warning("Token refresh failed: %s", r.text)
+        raise typer.Exit(1)
+    env = Path(".env")
+    env.write_text(
+        re.sub(r"(?m)^IG_TOKEN=.*$", f"IG_TOKEN={r.json()['access_token']}", env.read_text())
+    )
+    log.info("Token refreshed, valid for ~%s days", r.json().get("expires_in", 0) // 86400)
+
+    log.info("Token refreshed, valid for ~%s days", r.json().get("expires_in", 0) // 86400)
+
+
+@app.command()
+def approvals() -> None:
+    """Check for an emailed Approve/Reject reply and act on it. Run every 10 minutes."""
+    s = get_settings()
+    out = _today_dir()
+    token_file = out / ".token"
+    if not token_file.exists():
+        log.info("No pending approval today (no .token)")
+        return
+    if (out / ".hold").exists():
+        log.info("Hold file present, skipping")
+        return
+    if _already_posted():
+        log.info("Already posted today, skipping")
+        return
+    if datetime.now().hour >= s.approval_deadline_hour:
+        log.info("Past the %d:00 deadline, skipping", s.approval_deadline_hour)
+        return
+
+    from newsagent.notify.mailer import check_reply
+
+    decision = check_reply(token_file.read_text().strip())
+    if decision == "approve":
+        log.info("Approved by email, publishing")
+        _publish(out)
+        try:
+            refresh_token()
+        except (typer.Exit, httpx.HTTPError):
+            log.warning("Token refresh skipped")
+    elif decision == "reject":
+        (out / ".hold").touch()
+        log.info("Rejected by email, skipping today")
+    else:
+        log.info("No reply yet")
 
 
 @app.command()
