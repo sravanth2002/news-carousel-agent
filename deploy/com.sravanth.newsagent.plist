@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.sravanth.newsagent</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>cd /Users/sravanth/Developer/news-carousel-agent &amp;&amp; /Users/sravanth/.local/bin/uv run newsagent daily || osascript -e 'display notification "Daily run failed, check ~/Library/Logs/newsagent.log" with title "News carousel"'</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>30</integer></dict>
+  <key>StandardOutPath</key><string>/Users/sravanth/Library/Logs/newsagent.log</string>
+  <key>StandardErrorPath</key><string>/Users/sravanth/Library/Logs/newsagent.log</string>
+</dict>
+</plist>
